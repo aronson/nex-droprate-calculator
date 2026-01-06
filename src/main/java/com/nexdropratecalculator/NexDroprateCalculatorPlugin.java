@@ -31,15 +31,19 @@ public class NexDroprateCalculatorPlugin extends Plugin {
 
   private int ownContribution = 0;
   private int totalContribution = 0;
-  private boolean inFight = false;
-  private boolean inFightInit = false;
+  
+  // State tracking
+  private boolean fightActive = false;
+  private boolean overlayActive = false;
+  
+  // MVP/Drop tracking
   private boolean isMVP = false;
   private boolean minContribution = false;
-  private int waitTicks = 0;
-  private boolean dumpResults = false;
-  private boolean AtNex = false;
-  private int ticksUntilOverlayRemoval = -1;  // Initialize to -1 to indicate it's not active
-
+  
+  // Timers
+  private int ticksSinceFightEnd = -1;
+  private static final int RESET_DELAY_TICKS = 2;
+  private static final int OVERLAY_REMOVE_TICKS = 50;
 
   @Override
   protected void startUp() throws Exception {
@@ -52,11 +56,7 @@ public class NexDroprateCalculatorPlugin extends Plugin {
     navButton = NavigationButton.builder().tooltip("Nex Calculator").icon(icon).panel(panel).build();
 
     clientToolbar.addNavigation(navButton);
-
-    if (config.showOverlay() && (AtNex)) {
-      overlayManager.add(overlay);
-    }
-
+    
     log.debug("Nex Droprate Calculator Plugin started successfully");
   }
 
@@ -66,9 +66,11 @@ public class NexDroprateCalculatorPlugin extends Plugin {
 
     panel.deinit();
     clientToolbar.removeNavigation(navButton);
-    overlayManager.remove(overlay); // Remove the overlay from the overlay manager
+    overlayManager.remove(overlay);
     panel = null;
     navButton = null;
+    fightActive = false;
+    overlayActive = false;
 
     log.debug("Nex Droprate Calculator Plugin shut down successfully");
   }
@@ -76,8 +78,7 @@ public class NexDroprateCalculatorPlugin extends Plugin {
   @Subscribe
   public void onConfigChanged(ConfigChanged event) {
     if (event.getGroup().equals("nex-droprate-calculator") && (event.getKey().equals("showOverlay"))) {
-      if (config.showOverlay() && (AtNex))
-      {
+      if (config.showOverlay() && overlayActive) {
         overlayManager.add(overlay);
       } else {
         overlayManager.remove(overlay);
@@ -87,96 +88,85 @@ public class NexDroprateCalculatorPlugin extends Plugin {
 
   @Subscribe
   public void onGameTick(GameTick tick) {
+    NPC nex = findNex();
+    boolean nexIsPresent = (nex != null);
 
-    NPC nex = client.getNpcs().stream()
-            .filter(npc -> npc.getId() >= 11278 && npc.getId() <= 11282)
-            .findFirst()
-            .orElse(null);
-
-    inFight = nex != null;
-    log.debug("inFight status: {}", inFight);
-
-    if (inFight) {
-      if (!inFightInit) {
-        log.debug("Initializing fight");
-        waitTicks = 2;
-        dumpResults = true;
-        inFightInit = true;
-        isMVP = false;
-        minContribution = false;
-        ownContribution = 0;
-        totalContribution = 0;
-        AtNex = true;
-        if (config.showOverlay())
-        {
-          overlayManager.add(overlay);
-        }
+    if (fightActive) {
+      if (!nexIsPresent) {
+        // Fight ended
+        log.debug("Nex gone, ending fight");
+        endFight();
+        return;
       }
 
-      int players = (int) client.getPlayers().stream().count();
-      log.debug("Number of players in fight: {}", players);
+      // Still fighting
+      int players = client.getPlayers().size();
+
       panel.updateValues(ownContribution, totalContribution, players, isMVP, minContribution, 1);
       overlay.updateValues(ownContribution, totalContribution, players, isMVP, minContribution, 1);
+
+      // Reset tick contribution
       ownContribution = 0;
       totalContribution = 0;
-      // Reset the countdown if still in fight
-      ticksUntilOverlayRemoval = -1;  // Cancel countdown since we're in the fight
-      return;
-    }
 
-    if (waitTicks > 0) {
-      waitTicks--;
-      log.debug("Waiting ticks: {}", waitTicks);
     } else {
-      if (dumpResults) {
-        log.debug("Dumping results");
-        int players = (int) client.getPlayers().stream().count();
-        panel.updateValues(0, 0, 0, isMVP, minContribution, 0);
-        overlay.updateValues(0, 0, players, isMVP, minContribution, 0);
-        dumpResults = false;
-        inFightInit = false;
+      // Fight not active. Check if we are in cooldown/reset phase.
+      if (ticksSinceFightEnd >= 0) {
+        ticksSinceFightEnd++;
+
+        if (ticksSinceFightEnd == RESET_DELAY_TICKS) {
+            log.debug("Dumping results (resetting panel)");
+            int players = client.getPlayers().size();
+            panel.updateValues(0, 0, players, isMVP, minContribution, 0);
+            overlay.updateValues(0, 0, players, isMVP, minContribution, 0);
+        }
+
+        if (ticksSinceFightEnd >= OVERLAY_REMOVE_TICKS) {
+            log.debug("Removing overlay after cooldown");
+            setOverlayActive(false);
+            panel.updateValues(0, 0, 0, false, false, -1);
+            overlay.updateValues(0, 0, 0, false, false, -1);
+            ticksSinceFightEnd = -1; // Stop timer
+        }
       }
     }
+  }
 
-    if (inFight) {
-      log.debug("Exiting fight");
-      int players = (int) client.getPlayers().stream().count();
-      panel.updateValues(0, 0, 0, false, false, -1);
-      overlay.updateValues(0, 0, players, false, false, -1);
-    }
+  private void startFight() {
+    log.debug("Fight started via hitsplat latch");
+    fightActive = true;
+    ticksSinceFightEnd = -1; // Cancel any cooldown
+    
+    // Init values
+    isMVP = false;
+    minContribution = false;
+    ownContribution = 0;
+    totalContribution = 0;
+    
+    setOverlayActive(true);
+  }
 
-    // If fight has ended and countdown has not started yet
-    if (!inFight && ticksUntilOverlayRemoval == -1) {
-      ticksUntilOverlayRemoval = 50;  // Start 30-second countdown (50 game ticks)
-      log.debug("Fight ended, starting overlay removal countdown");
-    }
+  private void endFight() {
+    fightActive = false;
+    ticksSinceFightEnd = 0; // Start cooldown
 
-    // If the countdown is active, decrement the timer
-    if (ticksUntilOverlayRemoval > 0) {
-      ticksUntilOverlayRemoval--;
-      log.debug("Overlay removal countdown: {} ticks remaining", ticksUntilOverlayRemoval);
-    }
-
-    // Once the countdown reaches 0, remove the overlay
-    if (ticksUntilOverlayRemoval == 0) {
-      log.debug("30 seconds passed, removing overlay");
-      overlayManager.remove(overlay);  // Remove overlay after 30 seconds
-      panel.updateValues(0, 0, 0, false, false, -1);
-      overlay.updateValues(0, 0, 0, false, false, -1);
-      AtNex = false;  // Reset AtNex status
-      ticksUntilOverlayRemoval = -1;  // Reset countdown
-    }
-
-    // Reset fight status
-    inFight = false;
-    inFightInit = false;
+    // Handle end of fight update
+    int players = client.getPlayers().size();
+    panel.updateValues(0, 0, players, isMVP, minContribution, 0);
+  }
+  
+  private void setOverlayActive(boolean active) {
+      if (active == overlayActive) return;
+      overlayActive = active;
+      if (active) {
+          if (config.showOverlay()) overlayManager.add(overlay);
+      } else {
+          overlayManager.remove(overlay);
+      }
   }
 
   @Subscribe
   public void onChatMessage(ChatMessage chatMessage) {
-    Player player = client.getLocalPlayer();
-    log.debug("Received chat message: {}", chatMessage.getMessage());
-
     if (chatMessage.getType() == ChatMessageType.GAMEMESSAGE) {
       if (chatMessage.getMessage().contains("You were the MVP for this fight")) {
         log.debug("MVP message detected");
@@ -191,8 +181,22 @@ public class NexDroprateCalculatorPlugin extends Plugin {
 
   @Subscribe
   public void onHitsplatApplied(HitsplatApplied hitsplatApplied) {
-    if (inFight) {
-      if (hitsplatApplied.getActor() instanceof NPC) {
+    NPC nex = findNex();
+    if (nex == null) return; // Gate behind Nex presence
+    
+    Actor actor = hitsplatApplied.getActor();
+    
+    if (!fightActive) {
+        boolean validTrigger = actor instanceof NPC && ((NPC) actor).getId() == nex.getId();
+        if (actor instanceof Player) validTrigger = true;
+        
+        if (validTrigger) {
+            startFight();
+        }
+    }
+    
+    if (fightActive) {
+      if (actor instanceof NPC) {
         Hitsplat hitsplat = hitsplatApplied.getHitsplat();
         if (hitsplat.isMine()) {
           log.debug("Hitsplat applied to me: {}", hitsplat.getAmount());
@@ -209,5 +213,12 @@ public class NexDroprateCalculatorPlugin extends Plugin {
   @Provides
   NexDroprateCalculatorConfig provideConfig(ConfigManager configManager) {
     return configManager.getConfig(NexDroprateCalculatorConfig.class);
+  }
+  
+  private NPC findNex() {
+    return client.getNpcs().stream()
+            .filter(npc -> npc.getId() >= 11278 && npc.getId() <= 11282)
+            .findFirst()
+            .orElse(null);
   }
 }

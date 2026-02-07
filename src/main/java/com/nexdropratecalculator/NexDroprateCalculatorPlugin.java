@@ -87,7 +87,7 @@ public class NexDroprateCalculatorPlugin extends Plugin {
   }
 
   @Subscribe
-  public void onGameTick(GameTick tick) {
+  public void onGameTick(GameTick ignoredTick) {
     NPC nex = findNex();
     boolean nexIsPresent = (nex != null);
 
@@ -153,6 +153,7 @@ public class NexDroprateCalculatorPlugin extends Plugin {
     // Handle end of fight update
     int players = client.getPlayers().size();
     panel.updateValues(0, 0, players, isMVP, minContribution, 0);
+    overlay.updateValues(0, 0, players, isMVP, minContribution, 0);
   }
   
   private void setOverlayActive(boolean active) {
@@ -187,12 +188,13 @@ public class NexDroprateCalculatorPlugin extends Plugin {
     Actor actor = hitsplatApplied.getActor();
     
     if (!fightActive) {
-        boolean validTrigger = actor instanceof NPC && ((NPC) actor).getId() == nex.getId();
-        if (actor instanceof Player) validTrigger = true;
-        
-        if (validTrigger) {
-            startFight();
-        }
+      boolean validTrigger = wasNexInteraction(actor, nex);
+
+      if (validTrigger) {
+        startFight();
+      } else {
+        return;
+      }
     }
     
     if (fightActive) {
@@ -208,6 +210,35 @@ public class NexDroprateCalculatorPlugin extends Plugin {
         }
       }
     }
+  }
+
+  // Return if Nex fight is active
+  private boolean wasNexInteraction(Actor actor, NPC nex) {
+    boolean validTrigger = false;
+    // Was the player attacking?
+    if (actor instanceof Player) {
+      Player player = (Player) actor;
+      // Did the player attack Nex?
+      Actor interacting = player.getInteracting();
+      if (interacting instanceof NPC) {
+        NPC npc = (NPC) interacting;
+        // If the player attacked Nex, start new fight
+        validTrigger = npc.getId() == nex.getId();
+      }
+    }
+    // If the player did not attack Nex, did Nex attack the player?
+    if (!validTrigger && actor instanceof NPC) {
+      NPC npc = (NPC) actor;
+      // Did Nex attack a player?
+      Actor interacting = npc.getInteracting();
+      if (npc.getId() == nex.getId() && interacting instanceof Player) {
+        // Was it this client's player?
+        Player player = (Player) interacting;
+        // If so, start fight
+        validTrigger = player.getId() == client.getLocalPlayer().getId();
+      }
+    }
+    return validTrigger;
   }
 
   @Provides
